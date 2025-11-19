@@ -15,22 +15,22 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 BROWSERLESS_KEY = "2TRoxin1HzBK82pd61d325075632611b6f42769f243960fbc"
 MAX_CONCURRENT = 10
 
-# Queue & data
-queue = asyncio.Queue()
+# Queue & data (gebruik andere naam dan 'queue')
+scrape_queue = asyncio.Queue()
 active_scrapes = 0
-user_credits = {}  # user_id → credits
+user_credits = {}
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} is online – NIEUWE TABEL VERSIE 2.0")
+    print(f"{bot.user} is online – TABEL VERSIE LIVE!")
     scraper_loop.start()
 
 # ==== QUEUE WORKER ====
 @tasks.loop(seconds=1)
 async def scraper_loop():
     global active_scrapes
-    while not queue.empty() and active_scrapes < MAX_CONCURRENT:
-        ctx, album = await queue.get()
+    while not scrape_queue.empty() and active_scrapes < MAX_CONCURRENT:
+        ctx, album = await scrape_queue.get()
         active_scrapes += 1
         asyncio.create_task(process_scrape(ctx, album))
 
@@ -39,18 +39,16 @@ async def process_scrape(ctx, album):
     global active_scrapes
     user_id = ctx.author.id
 
-    # Credits
     if user_id not in user_credits:
         user_credits[user_id] = 100
     if user_credits[user_id] <= 0:
-        await ctx.send("❌ Geen credits meer → Word Producer Pass member!")
+        await ctx.send("Geen credits meer → Word Producer Pass member!")
         active_scrapes -= 1
         return
 
     user_credits[user_id] -= 1
-    status_msg = await ctx.send(f"Scraping **{album}**... (45–75 sec) | Queue: {queue.qsize()} ⏳")
+    status_msg = await ctx.send(f"Scraping **{album}**... (45–75 sec) | Wachtrij: {scrape_queue.qsize()}")
 
-    # Browserless call
     async with aiohttp.ClientSession() as session:
         payload = {
             "url": f"https://genius.com/albums/{album.replace(' ', '-')}",
@@ -69,12 +67,12 @@ async def process_scrape(ctx, album):
             async with session.post(f"https://chrome.browserless.io/scrape?token={BROWSERLESS_KEY}", json=payload, timeout=90) as resp:
                 data = await resp.json()
                 tracks = data.get("data", [])
-        except Exception as e:
+        except:
             await status_msg.edit(content="Fout bij Genius. Probeer later opnieuw.")
             active_scrapes -= 1
             return
 
-    # ==== MOOIE DISCORD TABEL (geen CSV!) ====
+    # ==== DISCORD TABEL ====
     results = []
     for track in tracks:
         title = track.get("title", "Onbekend")[:40]
@@ -86,7 +84,6 @@ async def process_scrape(ctx, album):
     for i in range(0, len(results), 20):
         chunk = results[i:i+20]
         page_text = "\n".join(chunk) if chunk else "Geen producers gevonden."
-        
         embed = discord.Embed(
             title=f"Producers + Instagram – {album}",
             description=page_text,
@@ -97,17 +94,15 @@ async def process_scrape(ctx, album):
         embed.set_footer(text=f"Pagina {i//20 + 1}/{total_pages} • Credits: {user_credits[user_id]}")
         pages.append(embed)
 
-    await status_msg.edit(content=f"**Klaar!** {len(results)} Instagram-handles gevonden ✅")
+    await status_msg.edit(content=f"**Klaar!** {len(results)} Instagram-handles gevonden")
     message = await ctx.send(embed=pages[0])
 
     if len(pages) > 1:
         await message.add_reaction("◀️")
         await message.add_reaction("▶️")
-
         page = 0
         def check(r, u):
             return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
-
         while True:
             try:
                 r, u = await bot.wait_for("reaction_add", timeout=120, check=check)
@@ -126,8 +121,8 @@ async def process_scrape(ctx, album):
 # ==== COMMANDOS ====
 @bot.command()
 async def scrape(ctx, *, album):
-    await queue.put((ctx, album))
-    pos = queue.qsize()
+    await scrape_queue.put((ctx, album))
+    pos = scrape_queue.qsize()
     await ctx.send(f"In queue – positie {pos} (max {MAX_CONCURRENT} tegelijk)")
 
 @bot.command()
@@ -137,6 +132,6 @@ async def credits(ctx):
 
 @bot.command()
 async def queue(ctx):
-    await ctx.send(f"Actief: {active_scrapes}/{MAX_CONCURRENT} | Wachtrij: {queue.qsize()}")
+    await ctx.send(f"Actief: {active_scrapes}/{MAX_CONCURRENT} | Wachtrij: {scrape_queue.qsize()}")
 
 bot.run(os.getenv("DISCORD_TOKEN"))
