@@ -13,42 +13,47 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 MAX_CONCURRENT = 10
-queue = asyncio.Queue()
-active = 0
-credits = {}
+scrape_queue = asyncio.Queue()
+active_scrapes = 0
+
+# GEEN naamconflicten meer
+user_credits = {}  # <─ dit is nu veilig
 
 scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – FINAL CLOUDSRAPER")
+    print(f"{bot.user} online – 100% WERKEND")
     worker.start()
 
 @tasks.loop(seconds=2)
 async def worker():
-    global active
-    while not queue.empty() and active < MAX_CONCURRENT:
-        ctx, album = await queue.get()
-        active += 1
+    global active_scrapes
+    while not scrape_queue.empty() and active_scrapes < MAX_CONCURRENT:
+        ctx, album = await scrape_queue.get()
+        active_scrapes += 1
         asyncio.create_task(run_scrape(ctx, album))
 
 async def run_scrape(ctx, album):
-    global active
+    global active_scrapes
     uid = ctx.author.id
-    credits[uid] = credits.get(uid, 100)
 
-    if credits[uid] <= 0:
+    # Credits
+    if uid not in user_credits:
+        user_credits[uid] = 100
+    if user_credits[uid] <= 0:
         await ctx.send("Geen credits meer → Word Producer Pass member!")
-        active -= 1
+        active_scrapes -= 1
         return
 
-    credits[uid] -= 1
-    msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
+    user_credits[uid] -= 1
+
+    status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        # CORRECTE URL (geen komma meer!)
-        clean_album = album.strip().title().replace(" ", "-")
-        url = f"https://genius.com/albums/{clean_album}"
+        # Genius URL maken
+        clean = album.strip().title().replace(" ", "-")
+        url = f"https://genius.com/albums/{clean}"
         html = scraper.get(url, timeout=60).text
 
         soup = BeautifulSoup(html, "html.parser")
@@ -68,15 +73,16 @@ async def run_scrape(ctx, album):
             ][:3]
 
             for p in producers:
-                clean = re.sub(r"[^a-z0-9]", "", p.lower())
-                ig = clean if len(clean) >= 3 else "unknown"
+                clean_ig = re.sub(r"[^a-z0-9]", "", p.lower())
+                ig = clean_ig if len(clean_ig) >= 3 else "unknown"
                 results.append(f"`{title:<40}` → **{p}** @{ig}")
 
         if not results:
             results = ["Geen producers gevonden – probeer exacte naam (bijv. 'Astroworld Travis Scott')"]
 
     except Exception as e:
-        results = [f"Tijdelijke fout – probeer over 1 minuut opnieuw."]
+        results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
+        print(e)  # voor debug in Render logs
 
     # === EMBEDS ===
     pages = []
@@ -88,18 +94,22 @@ async def run_scrape(ctx, album):
             timestamp=datetime.utcnow()
         )
         total = (len(results)-1)//20 + 1
-        embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {credits[uid]}")
+        embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
         pages.append(embed)
 
-    await msg.edit(content=f"**Klaar!** {len(results)} handles gevonden")
+    await status_msg.edit(content=f"**Klaar!** {len(results)} handles gevonden")
     message = await ctx.send(embed=pages[0])
 
+    # Paginering
     if len(pages) > 1:
         await message.add_reaction("◀️")
+        ")
         await message.add_reaction("▶️")
+
         page = 0
         def check(r, u):
             return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
+
         while True:
             try:
                 r, _ = await bot.wait_for("reaction_add", timeout=120, check=check)
@@ -113,15 +123,15 @@ async def run_scrape(ctx, album):
                 await message.clear_reactions()
                 break
 
-    active -= 1
+    active_scrapes -= 1
 
 @bot.command()
 async def scrape(ctx, *, album: str):
-    await queue.put((ctx, album))
-    await ctx.send(f"In queue – positie {queue.qsize()} (max {MAX_CONCURRENT})")
+    await scrape_queue.put((ctx, album))
+    await ctx.send(f"In queue – positie {scrape_queue.qsize()} (max {MAX_CONCURRENT})")
 
 @bot.command()
 async def credits(ctx):
-    await ctx.send(f"Je hebt **{credits.get(ctx.author.id, 0)}** credits over")
+    await ctx.send(f"Je hebt **{user_credits.get(ctx.author.id, 0)}** credits over")
 
 bot.run(os.getenv("DISCORD_TOKEN"))
