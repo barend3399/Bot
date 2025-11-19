@@ -21,7 +21,7 @@ scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – CLOUDSRAPER FINAL")
+    print(f"{bot.user} online – FINAL CLOUDSRAPER")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -46,8 +46,9 @@ async def run_scrape(ctx, album):
     msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        # Maak juiste Genius URL
-        url = f"https://genius.com/albums/{album.strip().title().replace(' ', ', '-').replace(' ', '-')}"
+        # CORRECTE URL (geen komma meer!)
+        clean_album = album.strip().title().replace(" ", "-")
+        url = f"https://genius.com/albums/{clean_album}"
         html = scraper.get(url, timeout=60).text
 
         soup = BeautifulSoup(html, "html.parser")
@@ -75,9 +76,9 @@ async def run_scrape(ctx, album):
             results = ["Geen producers gevonden – probeer exacte naam (bijv. 'Astroworld Travis Scott')"]
 
     except Exception as e:
-        results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
+        results = [f"Tijdelijke fout – probeer over 1 minuut opnieuw."]
 
-    # === EMBED MET PAGINERING ===
+    # === EMBEDS ===
     pages = []
     for i in range(0, len(results), 20):
         embed = discord.Embed(
@@ -86,6 +87,8 @@ async def run_scrape(ctx, album):
             color=0x00ff00,
             timestamp=datetime.utcnow()
         )
+        total = (len(results)-1)//20 + 1
+        embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {credits[uid]}")
         pages.append(embed)
 
     await msg.edit(content=f"**Klaar!** {len(results)} handles gevonden")
@@ -94,11 +97,9 @@ async def run_scrape(ctx, album):
     if len(pages) > 1:
         await message.add_reaction("◀️")
         await message.add_reaction("▶️")
-
         page = 0
         def check(r, u):
             return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
-
         while True:
             try:
                 r, _ = await bot.wait_for("reaction_add", timeout=120, check=check)
@@ -117,7 +118,7 @@ async def run_scrape(ctx, album):
 @bot.command()
 async def scrape(ctx, *, album: str):
     await queue.put((ctx, album))
-    await ctx.send(f"In queue – positie {queue.qsize()}")
+    await ctx.send(f"In queue – positie {queue.qsize()} (max {MAX_CONCURRENT})")
 
 @bot.command()
 async def credits(ctx):
