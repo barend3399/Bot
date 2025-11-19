@@ -2,4 +2,3 @@ discord.py
 cloudscraper
 beautifulsoup4
 lxml
-Flask
