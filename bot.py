@@ -2,7 +2,7 @@ import discord
 from discord.ext import commands, tasks
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import cloudscraper
 from bs4 import BeautifulSoup
@@ -21,7 +21,7 @@ scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – 100% WERKEND, LAATSTE VERSIE")
+    print(f"{bot.user} online – ÉCHT 100% WERKEND NU")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -47,7 +47,7 @@ async def run_scrape(ctx, album):
     status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        # STAP 1: probeer exact zoals gebruiker typt (meestal werkt dit)
+        # Probeer normaal
         query = album.strip().title().replace(" ", "-")
         url = f"https://genius.com/albums/{query}"
         html = scraper.get(url, timeout=60).text
@@ -55,10 +55,10 @@ async def run_scrape(ctx, album):
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.select(".chart_row")
 
-        # STAP 2: als geen tracks → probeer omgekeerd (Astroworld Travis Scott → Travis-Scott/Astroworld)
-        if len(rows) == 0 or "Oops! We couldn't find that page" in html:
-            reversed_query = "-".join(reversed(query.split("-")))
-            url = f"https://genius.com/albums/{reversed_query}"
+        # Als niks gevonden → probeer omgekeerd
+        if len(rows) == 0 or "Oops" in html:
+            query = "-".join(reversed(query.split("-")))
+            url = f"https://genius.com/albums/{query}"
             html = scraper.get(url, timeout=60).text
             soup = BeautifulSoup(html, "html.parser")
             rows = soup.select(".chart_row")
@@ -82,20 +82,20 @@ async def run_scrape(ctx, album):
                 results.append(f"`{title:<40}` → **{p}** @{ig}")
 
         if not results:
-            results = ["Geen producers gevonden – probeer een andere schrijfwijze (bijv. 'Travis Scott Astroworld')"]
+            results = ["Geen producers gevonden – probeer een andere volgorde (bijv. 'Travis Scott Astroworld')"]
 
     except Exception as e:
         results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
         print("Error:", e)
 
-    # === EMBEDS ===
+    # === EMBEDS (nu 100% compatible) ===
     pages = []
     for i in range(0, len(results), 20):
         embed = discord.Embed(
             title=f"Producers + Instagram – {album}",
             description="\n".join(results[i:i+20]),
             color=0x00ff00,
-            timestamp=datetime.now(datetime.UTC)
+            timestamp=datetime.now(timezone.utc)  # ← dit werkt overal
         )
         total = (len(results)-1)//20 + 1
         embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
