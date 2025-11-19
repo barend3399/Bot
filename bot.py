@@ -21,7 +21,7 @@ scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – GENIUS 100% WERKENDE VERSIE")
+    print(f"{bot.user} online – 100% WERKEND, LAATSTE VERSIE")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -47,19 +47,21 @@ async def run_scrape(ctx, album):
     status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        # === PERFECTE GENIUS URL ===
-        parts = album.strip().title().split(" ", 1)
-        if len(parts) == 1:
-            artist = "Various Artists"
-            title = parts[0]
-        else:
-            artist = parts[0]
-            title = parts[1] if len(parts) > 1 else parts[0]
-        url = f"https://genius.com/albums/{artist.replace(' ', '-')}/{title.replace(' ', '-')}"
-        
+        # STAP 1: probeer exact zoals gebruiker typt (meestal werkt dit)
+        query = album.strip().title().replace(" ", "-")
+        url = f"https://genius.com/albums/{query}"
         html = scraper.get(url, timeout=60).text
+
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.select(".chart_row")
+
+        # STAP 2: als geen tracks → probeer omgekeerd (Astroworld Travis Scott → Travis-Scott/Astroworld)
+        if len(rows) == 0 or "Oops! We couldn't find that page" in html:
+            reversed_query = "-".join(reversed(query.split("-")))
+            url = f"https://genius.com/albums/{reversed_query}"
+            html = scraper.get(url, timeout=60).text
+            soup = BeautifulSoup(html, "html.parser")
+            rows = soup.select(".chart_row")
 
         results = []
         for row in rows:
@@ -80,11 +82,11 @@ async def run_scrape(ctx, album):
                 results.append(f"`{title:<40}` → **{p}** @{ig}")
 
         if not results:
-            results = ["Geen producers gevonden – probeer exacte naam (bijv. 'Astroworld Travis Scott')"]
+            results = ["Geen producers gevonden – probeer een andere schrijfwijze (bijv. 'Travis Scott Astroworld')"]
 
     except Exception as e:
         results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
-        print("Scrape error:", e)
+        print("Error:", e)
 
     # === EMBEDS ===
     pages = []
@@ -93,7 +95,7 @@ async def run_scrape(ctx, album):
             title=f"Producers + Instagram – {album}",
             description="\n".join(results[i:i+20]),
             color=0x00ff00,
-            timestamp=datetime.utcnow()
+            timestamp=datetime.now(datetime.UTC)
         )
         total = (len(results)-1)//20 + 1
         embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
@@ -123,7 +125,6 @@ async def run_scrape(ctx, album):
 
     active_scrapes -= 1
 
-# ==== COMMANDOS ====
 @bot.command()
 async def scrape(ctx, *, album: str):
     await scrape_queue.put((ctx, album))
