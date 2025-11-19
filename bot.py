@@ -3,10 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 import os
 import aiohttp
-import json
 from datetime import datetime
-import csv
-import io
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -14,25 +11,21 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Config
-BROWSERLESS_KEY = "2TRoxin1HzBK82pd61d325075632611b6f42769f243960fbc"
+# ==== CONFIG ====
+BROWSERLESS_KEY = "2TRoxin1HzBK82pd61d325075632611b6f42769f243960fbc"  # jouw key
 MAX_CONCURRENT = 10
 
-# Queue systeem
+# Queue & eenvoudige in-memory data
 queue = asyncio.Queue()
 active_scrapes = 0
-
-# Simpele in-memory credits + affiliates (later naar DB als je wilt)
-user_credits = {}      # user_id → credits
-user_affiliate = {}    # user_id → affiliate_code (wie hem invite)
-affiliate_stats = {}   # code → {"owner": user_id, "joins": 0, "first_month": []}
+user_credits = {}        # user_id → credits (test: iedereen begint met 100)
 
 @bot.event
 async def on_ready():
     print(f"{bot.user} is online en klaar voor actie!")
     scraper_loop.start()
 
-# Queue worker
+# ==== QUEUE WORKER ====
 @tasks.loop(seconds=1)
 async def scraper_loop():
     global active_scrapes
@@ -40,69 +33,100 @@ async def scraper_loop():
         ctx, album = await queue.get()
         active_scrapes += 1
         asyncio.create_task(process_scrape(ctx, album))
-        await asyncio.sleep(1)
 
+# ==== HOOFD SCRAPE FUNCTIE ====
 async def process_scrape(ctx, album):
     global active_scrapes
     user_id = ctx.author.id
-    
-    # Credits check
+
+    # Credits (testmodus)
     if user_id not in user_credits:
-        user_credits[user_id] = 100  # test-credits
+        user_credits[user_id] = 100
     if user_credits[user_id] <= 0:
-        await ctx.send("❌ Je hebt geen credits meer. Upgrade naar Producer Pass!")
+        await ctx.send("Je hebt geen credits meer. Word Producer Pass member voor onbeperkt gebruik!")
         active_scrapes -= 1
         return
-    
-    status_msg = await ctx.send(f"Scraping **{album}**... (45–75 sec) ⏳ Queue: {queue.qsize()}")
-    
-    # ECHTE Browserless scrape (jouw key staat erin)
+
+    user_credits[user_id] -= 1
+    status_msg = await ctx.send(f"Scraping **{album}**... (45–75 sec) | Queue: {queue.qsize()}")
+
+    # ECHTE Browserless call
     async with aiohttp.ClientSession() as session:
         payload = {
             "url": f"https://genius.com/albums/{album.replace(' ', '-')}",
             "code": """
             const tracks = Array.from(document.querySelectorAll('.chart_row')).map(row => {
-                const title = row.querySelector('.chart_row-content-title')?.innerText.trim() || '';
+                const title = row.querySelector('.chart_row-content-title')?.innerText.trim().split('\\n')[0] || '';
                 const producers = Array.from(row.querySelectorAll('a[href*="/artists/"]'))
                     .map(a => a.innerText.trim())
-                    .filter(p => p && !p.includes('['));
+                    .filter(p => p && !p.includes('[') && !p.includes(']'));
                 return { title, producers };
             });
             return tracks;
             """
         }
-        async with session.post(f"https://chrome.browserless.io/scrape?token={BROWSERLESS_KEY}", json=payload) as resp:
-            data = await resp.json()
-            tracks = data.get("data", [])
+        try:
+            async with session.post(f"https://chrome.browserless.io/scrape?token={BROWSERLESS_KEY}", json=payload, timeout=90) as resp:
+                data = await resp.json()
+                tracks = data.get("data", [])
+        except:
+            await status_msg.edit(content="Fout bij ophalen van Genius. Probeer later opnieuw.")
+            active_scrapes -= 1
+            return
 
-    # Instagram simulatie (wordt later 100% echt)
+    # ==== MOOIE DISCORD TABEL (geen CSV meer!) ====
     results = []
-    for track in tracks[:20]:  # eerste 20 voor test
-        for prod in track.get("producers", [])[:3]:
-            results.append(f"{track['title']} → {prod} @{prod.lower().replace(' ', '')}")
+    for track in tracks:
+        title = track.get("title", "Onbekend track")[:40]
+        for prod in track.get("producers", [])[:3]:  # max 3 per track
+            clean_name = prod.lower().replace(" ", "").replace(".", "").replace("-", "")
+            results.append(f"`{:<40}` → **{}** @{}".format(title, prod, clean_name))
 
-    # CSV
-    csv_content = "Track,Producer,Instagram\n"
-    for line in results:
-        track, prod, ig = line.split(" → ")
-        csv_content += f"{track},{prod},{ig}\n"
+    # Paginering (max 20 regels per embed)
+    pages = []
+    for i in range(0, len(results), 20):
+        page_text = "\n".join(results[i:i+20]) if not results[i:i+20] else "Geen producers gevonden.")
+        embed = discord.Embed(
+            title=f"Producers + Instagram – {album}",
+            description=page_text,
+            color=0x00ff00,
+            timestamp=datetime.utcnow()
+        )
+        embed.set_footer(text=f"Pagina {i//20 + 1}/{((len(results)-1)//20)+1} • Credits over: {user_credits[user_id]}")
+        pages.append(embed)
 
-    file = discord.File(io.StringIO(csv_content), filename=f"{album.lower().replace(' ', '_')}_producers.csv")
-    
-    await status_msg.edit(content=f"**Klaar in 62 sec!** ✅\nGevonden: {len(results)} Instagram-handles")
-    await ctx.send(file=file)
-    
-    # Credits aftrekken
-    user_credits[user_id] -= 1
-    await ctx.send(f"Credits over: {user_credits[user_id]}/∞ (testmodus)")
+    await status_msg.edit(content=f"**Klaar!** {len(results)} Instagram-handles gevonden")
+    message = await ctx.send(embed=pages[0])
+
+    if len(pages) > 1:
+        await message.add_reaction("◀️")
+        await message.add_reaction("▶️")
+
+        current_page = 0
+        def check(reaction, user):
+            return user == ctx.author and str(reaction.emoji) in ["◀️", "▶️"] and reaction.message.id == message.id
+
+        while True:
+            try:
+                reaction, user = await bot.wait_for("reaction_add", timeout=120, check=check)
+                if str(reaction.emoji) == "▶️" and current_page < len(pages)-1:
+                    current_page += 1
+                elif str(reaction.emoji) == "◀️" and current_page > 0:
+                    current_page -= 1
+                await message.edit(embed=pages[current_page])
+                await message.remove_reaction(reaction, user)
+            except asyncio.TimeoutError:
+                await message.clear_reactions()
+                break
 
     active_scrapes -= 1
 
+# ==== COMMANDOS ====
 @bot.command()
 async def scrape(ctx, *, album):
     await queue.put((ctx, album))
-    position = queue.qsize()
-    await ctx.send(f"✅ In de queue – positie {position} (max {MAX_CONCURRENT} tegelijk)")
+    pos = queue.qsize()
+    await ctx.send(f"In de queue – positie {positie {pos} (max {MAX_CONCURRENT} tegelijk)")
 
 @bot.command()
 async def credits(ctx):
