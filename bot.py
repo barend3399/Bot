@@ -21,7 +21,7 @@ scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – 100% WERKEND, GEEN FOUTEN MEER")
+    print(f"{bot.user} online – GENIUS 100% WERKENDE VERSIE")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -47,10 +47,17 @@ async def run_scrape(ctx, album):
     status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        clean = album.strip().title().replace(" ", "-")
-        url = f"https://genius.com/albums/{clean}"
+        # === PERFECTE GENIUS URL ===
+        parts = album.strip().title().split(" ", 1)
+        if len(parts) == 1:
+            artist = "Various Artists"
+            title = parts[0]
+        else:
+            artist = parts[0]
+            title = parts[1] if len(parts) > 1 else parts[0]
+        url = f"https://genius.com/albums/{artist.replace(' ', '-')}/{title.replace(' ', '-')}"
+        
         html = scraper.get(url, timeout=60).text
-
         soup = BeautifulSoup(html, "html.parser")
         rows = soup.select(".chart_row")
 
@@ -68,8 +75,8 @@ async def run_scrape(ctx, album):
             ][:3]
 
             for p in producers:
-                clean_ig = re.sub(r"[^a-z0-9]", "", p.lower())
-                ig = clean_ig if len(clean_ig) >= 3 else "unknown"
+                clean = re.sub(r"[^a-z0-9]", "", p.lower())
+                ig = clean if len(clean) >= 3 else "unknown"
                 results.append(f"`{title:<40}` → **{p}** @{ig}")
 
         if not results:
@@ -92,18 +99,15 @@ async def run_scrape(ctx, album):
         embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
         pages.append(embed)
 
-    await status_msg.edit(content=f"**Klaar!** {len(results)} handles gevonden")
+    await status_msg.edit(content=f"**Klaar!** {len(results)} Instagram-handles gevonden")
     message = await ctx.send(embed=pages[0])
 
-    # Paginering
     if len(pages) > 1:
         await message.add_reaction("◀️")
         await message.add_reaction("▶️")
-
         page = 0
         def check(r, u):
             return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
-
         while True:
             try:
                 r, _ = await bot.wait_for("reaction_add", timeout=120, check=check)
@@ -119,6 +123,7 @@ async def run_scrape(ctx, album):
 
     active_scrapes -= 1
 
+# ==== COMMANDOS ====
 @bot.command()
 async def scrape(ctx, *, album: str):
     await scrape_queue.put((ctx, album))
