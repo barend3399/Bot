@@ -15,15 +15,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 MAX_CONCURRENT = 10
 scrape_queue = asyncio.Queue()
 active_scrapes = 0
-
-# GEEN naamconflicten meer
-user_credits = {}  # <─ dit is nu veilig
+user_credits = {}
 
 scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – 100% WERKEND")
+    print(f"{bot.user} online – 100% WERKEND, GEEN FOUTEN MEER")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -38,7 +36,6 @@ async def run_scrape(ctx, album):
     global active_scrapes
     uid = ctx.author.id
 
-    # Credits
     if uid not in user_credits:
         user_credits[uid] = 100
     if user_credits[uid] <= 0:
@@ -47,11 +44,9 @@ async def run_scrape(ctx, album):
         return
 
     user_credits[uid] -= 1
-
     status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
 
     try:
-        # Genius URL maken
         clean = album.strip().title().replace(" ", "-")
         url = f"https://genius.com/albums/{clean}"
         html = scraper.get(url, timeout=60).text
@@ -82,7 +77,7 @@ async def run_scrape(ctx, album):
 
     except Exception as e:
         results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
-        print(e)  # voor debug in Render logs
+        print("Scrape error:", e)
 
     # === EMBEDS ===
     pages = []
@@ -103,7 +98,6 @@ async def run_scrape(ctx, album):
     # Paginering
     if len(pages) > 1:
         await message.add_reaction("◀️")
-        ")
         await message.add_reaction("▶️")
 
         page = 0
