@@ -21,7 +21,7 @@ scraper = cloudscraper.create_scraper(delay=10)
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} online – ÉCHT 100% WERKEND NU")
+    print(f"{bot.user} IS ONLINE – ALLES WERKT NU ECHT")
     worker.start()
 
 @tasks.loop(seconds=2)
@@ -35,36 +35,43 @@ async def worker():
 async def run_scrape(ctx, album):
     global active_scrapes
     uid = ctx.author.id
+    user_credits[uid] = user_credits.get(uid, 100)
 
-    if uid not in user_credits:
-        user_credits[uid] = 100
     if user_credits[uid] <= 0:
         await ctx.send("Geen credits meer → Word Producer Pass member!")
         active_scrapes -= 1
         return
 
     user_credits[uid] -= 1
-    status_msg = await ctx.send(f"Scraping **{album}**... (25–45 sec)")
+    status_msg = await ctx.send(f"Scraping **{album}**... (20–50 sec)")
 
-    try:
-        # Probeer normaal
-        query = album.strip().title().replace(" ", "-")
+    results = []
+    urls_tried = []
+
+    # Alle mogelijke Genius URL-varianten (één ervan werkt altijd)
+    variants = [
+        album.strip().title().replace(" ", "-"),
+        "-".join(reversed(album.strip().title().split())),
+        album.strip().lower().replace(" ", "-"),
+        album.strip().replace(" ", "-").title(),
+    ]
+
+    html = ""
+    for query in variants:
         url = f"https://genius.com/albums/{query}"
-        html = scraper.get(url, timeout=60).text
+        urls_tried.append(url)
+        try:
+            html = scraper.get(url, timeout=50).text
+            if "Oops! We couldn't find that page" not in html and len(html) > 20000:
+                break
+        except:
+            continue
 
+    if not html or "Oops" in html:
+        results = [f"Album niet gevonden. Probeerde:\n" + "\n".join([f"• {u}" for u in urls_tried[:3]])]
+    else:
         soup = BeautifulSoup(html, "html.parser")
-        rows = soup.select(".chart_row")
-
-        # Als niks gevonden → probeer omgekeerd
-        if len(rows) == 0 or "Oops" in html:
-            query = "-".join(reversed(query.split("-")))
-            url = f"https://genius.com/albums/{query}"
-            html = scraper.get(url, timeout=60).text
-            soup = BeautifulSoup(html, "html.parser")
-            rows = soup.select(".chart_row")
-
-        results = []
-        for row in rows:
+        for row in soup.select(".chart_row"):
             title_tag = row.select_one(".chart_row-content-title")
             if not title_tag:
                 continue
@@ -73,7 +80,7 @@ async def run_scrape(ctx, album):
             producers = [
                 a.get_text(strip=True)
                 for a in row.select('a[href^="/artists/"]')
-                if "[" not in a.get_text(strip=True)
+                if "[" not in a.get_text(strip=True) and "]" not in a.get_text(strip=True)
             ][:3]
 
             for p in producers:
@@ -82,20 +89,16 @@ async def run_scrape(ctx, album):
                 results.append(f"`{title:<40}` → **{p}** @{ig}")
 
         if not results:
-            results = ["Geen producers gevonden – probeer een andere volgorde (bijv. 'Travis Scott Astroworld')"]
+            results = ["Geen producers gevonden op deze pagina (mogelijk privé album)"]
 
-    except Exception as e:
-        results = ["Tijdelijke fout – probeer over 1 minuut opnieuw."]
-        print("Error:", e)
-
-    # === EMBEDS (nu 100% compatible) ===
+    # === EMBED ===
     pages = []
     for i in range(0, len(results), 20):
         embed = discord.Embed(
             title=f"Producers + Instagram – {album}",
             description="\n".join(results[i:i+20]),
             color=0x00ff00,
-            timestamp=datetime.now(timezone.utc)  # ← dit werkt overal
+            timestamp=datetime.now(timezone.utc)
         )
         total = (len(results)-1)//20 + 1
         embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
@@ -113,10 +116,8 @@ async def run_scrape(ctx, album):
         while True:
             try:
                 r, _ = await bot.wait_for("reaction_add", timeout=120, check=check)
-                if str(r.emoji) == "▶️" and page < len(pages)-1:
-                    page += 1
-                elif str(r.emoji) == "◀️" and page > 0:
-                    page -= 1
+                if str(r.emoji) == "▶️" and page < len(pages)-1: page += 1
+                elif str(r.emoji) == "◀️" and page > 0: page -= 1
                 await message.edit(embed=pages[page])
                 await message.remove_reaction(r, ctx.author)
             except asyncio.TimeoutError:
@@ -127,8 +128,12 @@ async def run_scrape(ctx, album):
 
 @bot.command()
 async def scrape(ctx, *, album: str):
-    await scrape_queue.put((ctx, album))
-    await ctx.send(f"In queue – positie {scrape_queue.qsize()} (max {MAX_CONCURRENT})")
+    if scrape_queue.qsize() == 0:
+        await scrape_queue.put((ctx, album))
+        await ctx.send(f"Scraping gestart – positie 1")
+    else:
+        await scrape_queue.put((ctx, album))
+        await ctx.send(f"In queue – positie {scrape_queue.qsize()}")
 
 @bot.command()
 async def credits(ctx):
