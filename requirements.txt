@@ -1,4 +1,2 @@
 discord.py
 aiohttp
-beautifulsoup4
-lxml
