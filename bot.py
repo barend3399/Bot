@@ -5,6 +5,7 @@ import os
 import aiohttp
 from datetime import datetime
 from bs4 import BeautifulSoup
+import re
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -23,7 +24,7 @@ user_credits = {}
 
 @bot.event
 async def on_ready():
-    print(f"{bot.user} is online – GENIUS FIX LIVE!")
+    print(f"{bot.user} is online – GENIUS FALLBACK LIVE!")
     scraper_loop.start()
 
 # ==== QUEUE WORKER ====
@@ -50,51 +51,74 @@ async def process_scrape(ctx, album):
     user_credits[user_id] -= 1
     status_msg = await ctx.send(f"Scraping **{album}**... (45–90 sec) | Wachtrij: {scrape_queue.qsize()}")
 
-    async with aiohttp.ClientSession() as session:
-        payload = {
-            "url": f"https://genius.com/albums/{album.replace(' ', '-')}",
-            "code": """
-            await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-            await page.waitForSelector('.chart_row', { timeout: 30000 });
-            return await page.content();
-            """
-        }
-        try:
+    tracks = []
+    success = False
+
+    # ==== POGING 1: Browserless (stealth) ====
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "url": f"https://genius.com/albums/{album.replace(' ', '-')}",
+                "code": """
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+                await page.waitForSelector('.chart_row', { timeout: 30000 });
+                return await page.content();
+                """
+            }
             async with session.post(
                 f"https://chrome.browserless.io/content?token={BROWSERLESS_KEY}",
                 json=payload,
                 headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=120
+                timeout=90
             ) as resp:
                 html = await resp.text()
 
-                if "challenge" in html.lower() or "Just a moment" in html or len(html) < 10000:
-                    await status_msg.edit(content="Genius blokkeert momenteel. Probeer over 5–10 min opnieuw.")
-                    active_scrapes -= 1
-                    return
+                if "challenge" not in html.lower() and len(html) > 50000:
+                    soup = BeautifulSoup(html, 'html.parser')
+                    for row in soup.select('.chart_row'):
+                        title_el = row.select_one('.chart_row-content-title')
+                        title = title_el.get_text(strip=True).split('\n')[0] if title_el else "Onbekend"
+                        producers = [a.get_text(strip=True) for a in row.select('a[href*="/artists/"]') if '[' not in a.get_text() and ']' not in a.get_text()]
+                        if title and producers:
+                            tracks.append({"title": title, "producers": producers})
+                    success = True
+    except:
+        pass
 
-                soup = BeautifulSoup(html, 'html.parser')
-                tracks = []
-                for row in soup.select('.chart_row'):
-                    title_el = row.select_one('.chart_row-content-title')
-                    title = title_el.get_text(strip=True).split('\n')[0] if title_el else "Onbekend"
-                    producers = [
-                        a.get_text(strip=True) for a in row.select('a[href*="/artists/"]')
-                        if '[' not in a.get_text() and ']' not in a.get_text()
-                    ]
-                    tracks.append({"title": title, "producers": producers})
-
-        except Exception as e:
-            await status_msg.edit(content="Tijdelijke blokkade van Genius. Probeer over 5–10 min opnieuw.")
+    # ==== FALLBACK: Simpele requests (als Browserless faalt) ====
+    if not success:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://genius.com/albums/{album.replace(' ', '-')}",
+                    headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"},
+                    timeout=30
+                ) as resp:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, 'html.parser')
+                    for row in soup.select('.chart_row'):
+                        title_el = row.select_one('.chart_row-content-title')
+                        title = title_el.get_text(strip=True).split('\n')[0] if title_el else "Onbekend"
+                        producers = [a.get_text(strip=True) for a in row.select('a[href*="/artists/"]') if '[' not in a.get_text() and ']' not in a.get_text()]
+                        if title and producers:
+                            tracks.append({"title": title, "producers": producers})
+                    success = True
+        except:
+            await status_msg.edit(content="Tijdelijke blokkade. Probeer over 5–10 min opnieuw.")
             active_scrapes -= 1
             return
+
+    if not success:
+        active_scrapes -= 1
+        return
 
     # ==== DISCORD TABEL ====
     results = []
     for track in tracks:
         title = track.get("title", "Onbekend")[:40]
         for prod in track.get("producers", [])[:3]:
-            clean = prod.lower().replace(" ", "").replace(".", "").replace("-", "")
+            clean = re.sub(r'[^a-z0-9]', '', prod.lower())
             results.append(f"`{title:<40}` → **{prod}** @{clean}")
 
     pages = []
@@ -115,17 +139,17 @@ async def process_scrape(ctx, album):
     message = await ctx.send(embed=pages[0])
 
     if len(pages) > 1:
-        await message.add_reaction("Previous")
-        await message.add_reaction("Next")
+        await message.add_reaction("◀️")
+        await message.add_reaction("▶️")
         page = 0
         def check(r, u):
-            return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["Previous", "Next"]
+            return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
         while True:
             try:
                 r, u = await bot.wait_for("reaction_add", timeout=120, check=check)
-                if str(r.emoji) == "Next" and page < len(pages)-1:
+                if str(r.emoji) == "▶️" and page < len(pages)-1:
                     page += 1
-                elif str(r.emoji) == "Previous" and page > 0:
+                elif str(r.emoji) == "◀️" and page > 0:
                     page -= 1
                 await message.edit(embed=pages[page])
                 await message.remove_reaction(r, u)
