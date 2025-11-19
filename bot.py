@@ -1,289 +1,130 @@
-import discord
-from discord.ext import commands, tasks
-import asyncio
 import os
-from datetime import datetime, timezone
-import re
+import threading
+from flask import Flask
+import discord
+from discord.ext import commands
+import asyncio
 import cloudscraper
 from bs4 import BeautifulSoup
-from flask import Flask
-import threading
+from datetime import datetime, timezone
+import re
 import urllib.parse
 
 # -------------------------
-# Flask keep-alive (Render)
+# FLASK KEEP-ALIVE (Render)
 # -------------------------
+
 app = Flask(__name__)
+
 @app.route("/")
 def home():
-    return "discord bot running"
+    return "Bot is running"
 
-def run_web():
+def run_flask():
     app.run(host="0.0.0.0", port=10000)
 
-threading.Thread(target=run_web, daemon=True).start()
+# start flask in a thread
+threading.Thread(target=run_flask, daemon=True).start()
 
 # -------------------------
-# Discord setup
+# DISCORD BOT SETUP
 # -------------------------
+
 intents = discord.Intents.default()
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-MAX_CONCURRENT = 5
-scrape_queue = asyncio.Queue()
-active_scrapes = 0
-user_credits = {}
+scraper = cloudscraper.create_scraper()
 
-scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "mobile": False}
-)
+def slug(t):
+    return t.strip().replace(" ", "-")
 
-# -------------------------
-# Helpers: build / search URLs
-# -------------------------
-def slug(x):
-    return x.strip().replace(" ", "-")
-
-def build_album_candidates(raw):
-    """
-    raw: 'Artist - Album' expected but we'll still try to be flexible.
-    returns list of candidate album URLs (most likely first).
-    """
-    candidates = []
-
-    # try to split properly
-    if " - " in raw:
-        artist, album = raw.split(" - ", 1)
+def build_album_links(text):
+    links = []
+    if " - " in text:
+        artist, album = text.split(" - ", 1)
         a = slug(artist)
         b = slug(album)
-        candidates += [
-            f"https://genius.com/albums/{a.title()}/{b.title()}",
-            f"https://genius.com/albums/{a}/{b}",
-            f"https://genius.com/albums/{a.lower()}/{b.lower()}",
-        ]
-    else:
-        # If no " - ", try permutations
-        parts = raw.strip().split()
-        if len(parts) >= 2:
-            # assume last word(s) are album
-            for split_at in range(1, len(parts)):
-                artist = " ".join(parts[:split_at])
-                album = " ".join(parts[split_at:])
-                a = slug(artist); b = slug(album)
-                candidates += [
-                    f"https://genius.com/albums/{a.title()}/{b.title()}",
-                    f"https://genius.com/albums/{a}/{b}",
-                ]
+        links.append(f"https://genius.com/albums/{a}/{b}")
+        links.append(f"https://genius.com/albums/{a.title()}/{b.title()}")
+    return links
 
-    # ensure uniqueness while preserving order
-    seen = set()
-    uniq = []
-    for u in candidates:
-        if u not in seen:
-            uniq.append(u); seen.add(u)
-    return uniq
-
-def search_genius_album(raw):
-    """
-    Fallback: use Genius search to locate album result and return its albums/... link if found.
-    """
-    q = urllib.parse.quote_plus(raw)
+def search_genius(query):
+    q = urllib.parse.quote_plus(query)
     url = f"https://genius.com/search?q={q}"
     try:
-        r = scraper.get(url, timeout=30)
-        if r.status_code != 200:
-            return None
+        r = scraper.get(url)
         soup = BeautifulSoup(r.text, "html.parser")
-        # search results contain links; look for /albums/ links
         for a in soup.select("a[href]"):
-            href = a["href"]
-            if "/albums/" in href:
-                # normalize absolute
+            if "/albums/" in a["href"]:
+                href = a["href"]
                 if href.startswith("/"):
                     href = "https://genius.com" + href
                 return href
-    except Exception as e:
-        print("DEBUG search_genius_album error:", e)
+    except:
+        pass
     return None
 
-# -------------------------
-# Parser: producers
-# -------------------------
 def parse_producers(html):
     soup = BeautifulSoup(html, "html.parser")
-    results = []
+    producers = []
 
-    # 1) metadata_unit (album-level)
     for unit in soup.select("div.metadata_unit"):
-        label = unit.select_one("h3, .metadata_unit-label, .metadata_label")
-        if label and "producer" in label.get_text(" ", strip=True).lower():
+        lbl = unit.get_text(" ", strip=True).lower()
+        if "producer" in lbl:
             for a in unit.select("a"):
                 name = a.get_text(strip=True)
-                if name:
-                    username = re.sub(r"[^a-z0-9]", "", name.lower())
-                    ig = username if len(username) > 2 else "unknown"
-                    results.append(f"**{name}** → @{ig}")
+                ig = re.sub(r"[^a-z0-9]", "", name.lower())
+                producers.append(f"**{name}** → @{ig}")
 
-    # 2) per-song credits (song rows)
-    # pick multiple possible selectors (Genius layout varies)
-    song_rows = soup.select("div.chart_row, div.song_row, li.song, div.track_listing_row")
-    for row in song_rows:
-        title_tag = row.select_one(".chart_row-content-title, .song_title, .song_title_raw, .title")
-        if not title_tag:
-            continue
-        title = title_tag.get_text(" ", strip=True)[:50]
-        producers = set()
-        # check blocks that might contain roles/credits
-        for block in row.select(".metadata_unit, .SongInfo, .ContributorList, .credits, .roles"):
-            txt = block.get_text(" ", strip=True).lower()
-            if "producer" in txt or "prod" in txt:
-                for a in block.select('a[href^="/artists/"], a[href*="/artist/"], a'):
-                    pname = a.get_text(strip=True)
-                    if pname:
-                        producers.add(pname)
-        # fallback: find any "producer" words and take sibling links
-        if not producers:
-            # look for text matches "Produced by <link>"
-            txt = row.get_text(" ", strip=True)
-            m = re.search(r"Produced by (.+)", txt, re.IGNORECASE)
-            if m:
-                # try to extract names separated by commas
-                names = [n.strip() for n in re.split(r",|&| and ", m.group(1)) if n.strip()]
-                for n in names:
-                    producers.add(n)
-
-        for p in producers:
-            username = re.sub(r"[^a-z0-9]", "", p.lower())
-            ig = username if len(username) > 2 else "unknown"
-            results.append(f"`{title:<40}` → **{p}** @{ig}")
-
-    # dedupe while preserving order
-    seen = set(); out = []
-    for r in results:
-        if r not in seen:
-            out.append(r); seen.add(r)
-    return out
+    return producers
 
 # -------------------------
-# Main runner
+# DISCORD COMMAND
 # -------------------------
-async def run_scrape(ctx, album):
-    global active_scrapes
-    uid = ctx.author.id
-    user_credits[uid] = user_credits.get(uid, 100)
 
-    if user_credits[uid] <= 0:
-        await ctx.send("Geen credits meer → koop Producer Pass")
-        active_scrapes -= 1
-        return
+@bot.command()
+async def scrape(ctx, *, text):
+    await ctx.send("Scraping…")
 
-    user_credits[uid] -= 1
-    status_msg = await ctx.send(f"Scraping **{album}**… (probeer URLs + zoek fallback)")
+    print("DEBUG: command received:", text)
 
-    candidates = build_album_candidates(album)
-    print("DEBUG candidates:", candidates)
-    html = None
-    used_url = None
-
-    # Try direct album candidate URLs
-    for url in candidates:
+    # 1) Try direct URLs
+    for url in build_album_links(text):
+        print("DEBUG trying:", url)
         try:
-            r = scraper.get(url, timeout=30)
-            print(f"DEBUG try {url} → {r.status_code} len {len(r.text) if r and r.text else 0}")
-            if r.status_code == 200 and len(r.text) > 1500:
-                html = r.text
-                used_url = url
-                break
-        except Exception as e:
-            print("DEBUG request error:", e)
+            r = scraper.get(url)
+            if r.status_code == 200 and len(r.text) > 2000:
+                prods = parse_producers(r.text)
+                if prods:
+                    await ctx.send("\n".join(prods))
+                    return
+        except:
+            pass
 
-    # Fallback: Genius search page
-    if not html:
-        search_url = search_genius_album(album)
-        print("DEBUG search_url:", search_url)
-        if search_url:
-            try:
-                r = scraper.get(search_url, timeout=30)
-                if r.status_code == 200 and len(r.text) > 1500:
-                    html = r.text
-                    used_url = search_url
-            except Exception as e:
-                print("DEBUG fallback request error:", e)
+    # 2) Search fallback
+    print("DEBUG direct failed, searching…")
+    found = search_genius(text)
+    print("DEBUG search result:", found)
 
-    if not html:
-        await status_msg.edit(content="Album niet gevonden. Gebruik **Artist - Album**. (Debug logs in console)")
-        active_scrapes -= 1
+    if not found:
+        await ctx.send("Album niet gevonden via Genius search.")
         return
 
-    # parse
-    results = parse_producers(html)
-    print("DEBUG parsed results count:", len(results))
+    r = scraper.get(found)
+    prods = parse_producers(r.text)
 
-    if not results:
-        results = ["Geen producers gevonden op deze pagina. Zie console-log voor HTML snippet."]
-
-    # embeds
-    pages = []
-    for i in range(0, len(results), 20):
-        embed = discord.Embed(
-            title=f"Producers + Instagram – {album}",
-            description="\n".join(results[i:i+20]),
-            color=0x00ff00,
-            timestamp=datetime.now(timezone.utc)
-        )
-        total = (len(results) - 1) // 20 + 1
-        embed.set_footer(text=f"Pagina {i//20 + 1}/{total} • Credits: {user_credits[uid]}")
-        pages.append(embed)
-
-    await status_msg.edit(content=f"**Klaar!** {len(results)} producers gevonden (gebruikt: {used_url})")
-    msg = await ctx.send(embed=pages[0])
-
-    # paginator
-    if len(pages) > 1:
-        await msg.add_reaction("◀️")
-        await msg.add_reaction("▶️")
-        page = 0
-        def check(r, u):
-            return u == ctx.author and r.message.id == msg.id and str(r.emoji) in ["◀️", "▶️"]
-        while True:
-            try:
-                r, _ = await bot.wait_for("reaction_add", timeout=150, check=check)
-                if str(r.emoji) == "▶️" and page < len(pages)-1:
-                    page += 1
-                elif str(r.emoji) == "◀️" and page > 0:
-                    page -= 1
-                await msg.edit(embed=pages[page])
-                await msg.remove_reaction(r, ctx.author)
-            except asyncio.TimeoutError:
-                await msg.clear_reactions()
-                break
-
-    active_scrapes -= 1
+    if not prods:
+        await ctx.send("Geen producers gevonden.")
+    else:
+        await ctx.send("\n".join(prods))
 
 # -------------------------
-# Commands & worker
+# START BOT
 # -------------------------
-@bot.command()
-async def scrape(ctx, *, album: str):
-    await scrape_queue.put((ctx, album))
-    await ctx.send(f"In queue – positie {scrape_queue.qsize()} (format: Artist - Album)")
 
-@bot.command()
-async def credits(ctx):
-    await ctx.send(f"Je hebt **{user_credits.get(ctx.author.id, 0)}** credits.")
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-@tasks.loop(seconds=2)
-async def worker():
-    global active_scrapes
-    while not scrape_queue.empty() and active_scrapes < MAX_CONCURRENT:
-        ctx, album = await scrape_queue.get()
-        active_scrapes += 1
-        asyncio.create_task(run_scrape(ctx, album))
-
-@bot.event
-async def on_ready():
-    print(f"{bot.user} is online")
-    worker.start()
-
-bot.run(os.getenv("DISCORD_TOKEN"))
+print("DEBUG: starting Discord bot…")
+bot.run(TOKEN)
