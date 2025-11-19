@@ -9,15 +9,15 @@ from bs4 import BeautifulSoup
 from flask import Flask
 import threading
 
-# =========================
+# ==============================
 # FLASK KEEP-ALIVE SERVER
-# =========================
+# ==============================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "Bot is running!"
+    return "discord bot running"
 
 def run_web():
     app.run(host="0.0.0.0", port=10000)
@@ -25,9 +25,9 @@ def run_web():
 threading.Thread(target=run_web).start()
 
 
-# =========================
+# ==============================
 # DISCORD BOT SETUP
-# =========================
+# ==============================
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -44,59 +44,54 @@ scraper = cloudscraper.create_scraper(
 )
 
 
-# =========================
-# ON READY
-# =========================
-
-@bot.event
-async def on_ready():
-    print(f"{bot.user} is online — scraper ready")
-    worker.start()
-
-
-# =========================
-# QUEUE WORKER
-# =========================
-
-@tasks.loop(seconds=2)
-async def worker():
-    global active_scrapes
-    while not scrape_queue.empty() and active_scrapes < MAX_CONCURRENT:
-        ctx, album = await scrape_queue.get()
-        active_scrapes += 1
-        asyncio.create_task(run_scrape(ctx, album))
-
-
-# =========================
-# GENIUS URL BUILDER
-# =========================
+# ==============================
+# UTIL: BUILD GENIUS URLS
+# ==============================
 
 def build_album_urls(raw):
-    """Verwacht: 'Artist - Album' en maakt verschillende Genius URL's."""
+    """Verwacht: 'Artist - Album'"""
     if " - " not in raw:
         return []
 
     artist, album = raw.split(" - ", 1)
-    a = artist.strip().replace(" ", "-")
-    b = album.strip().replace(" ", "-")
 
-    urls = [
+    def slug(x):
+        return x.strip().replace(" ", "-")
+
+    a = slug(artist)
+    b = slug(album)
+
+    return [
         f"https://genius.com/albums/{a.title()}/{b.title()}",
         f"https://genius.com/albums/{a}/{b}",
         f"https://genius.com/albums/{a.lower()}/{b.lower()}",
     ]
-    return urls
 
 
-# =========================
-# PRODUCER SCRAPER
-# =========================
+# ==============================
+# SCRAPER: PARSE PRODUCERS
+# ==============================
 
 def parse_producers(html):
     soup = BeautifulSoup(html, "html.parser")
     results = []
 
-    # Veel stabielere selector:
+    # ====== 1) Pak album metadata (Producer-veld) ======
+    metadata_units = soup.select("div.metadata_unit")
+
+    for unit in metadata_units:
+        label = unit.select_one("h3.metadata_unit-label")
+        if not label:
+            continue
+
+        if "producer" in label.get_text(strip=True).lower():
+            for a in unit.select("a"):
+                name = a.get_text(strip=True)
+                username = re.sub(r"[^a-z0-9]", "", name.lower())
+                ig = username if len(username) > 2 else "unknown"
+                results.append(f"**{name}** → @{ig}")
+
+    # ====== 2) Pak song-per-song producer credit ======
     songs = soup.select("div.chart_row, div.song_row")
 
     for row in songs:
@@ -106,37 +101,28 @@ def parse_producers(html):
 
         title = title_tag.get_text(strip=True)[:50]
 
-        # Nieuwe Genius layout gebruikt: .RoleLabel + .ContributorList
-        producers = []
+        producers = set()
 
-        # Zoek ALLE rollen
-        roles = row.select(".SongInfo, .role_details, .ContributorList")
+        # Nieuwe Genius layout
+        for block in row.select(".metadata_unit, .SongInfo, .RoleLabel, .ContributorList"):
+            txt = block.get_text(" ", strip=True).lower()
 
-        for r in roles:
-            role_name = r.get_text(" ", strip=True).lower()
+            if "producer" in txt:
+                for a in block.select('a[href^="/artists/"]'):
+                    pname = a.get_text(strip=True)
+                    producers.add(pname)
 
-            # Als dit een rol is die producer aangeeft
-            if any(x in role_name for x in ["producer", "prod", "prod."]):
-                for a in r.select('a[href^="/artists/"]'):
-                    name = a.get_text(strip=True)
-                    if name not in producers:
-                        producers.append(name)
-
-        if not producers:
-            continue
-
-        # Instagram-guessing (placeholder)
         for p in producers:
-            clean = re.sub(r"[^a-z0-9]", "", p.lower())
-            ig = clean if len(clean) > 3 else "unknown"
+            username = re.sub(r"[^a-z0-9]", "", p.lower())
+            ig = username if len(username) > 2 else "unknown"
             results.append(f"`{title:<40}` → **{p}** @{ig}")
 
     return results
 
 
-# =========================
-# SCRAPER RUN
-# =========================
+# ==============================
+# MAIN SCRAPE RUNNER
+# ==============================
 
 async def run_scrape(ctx, album):
     global active_scrapes
@@ -144,38 +130,43 @@ async def run_scrape(ctx, album):
     user_credits[uid] = user_credits.get(uid, 100)
 
     if user_credits[uid] <= 0:
-        await ctx.send("Geen credits → upgrade naar Producer Pass!")
+        await ctx.send("Geen credits meer → koop Producer Pass")
         active_scrapes -= 1
         return
 
     user_credits[uid] -= 1
-    status_msg = await ctx.send(f"Scraping **{album}**… (20–45 sec)")
+    status_msg = await ctx.send(f"Scraping **{album}**… (15–30 sec)")
 
     urls = build_album_urls(album)
     valid_html = None
+    used_url = None
 
     for url in urls:
         try:
             r = scraper.get(url, timeout=40)
-            if r.status_code == 200 and len(r.text) > 5000:
+            if r.status_code == 200 and len(r.text) > 2000:
                 valid_html = r.text
+                used_url = url
                 break
         except:
             pass
 
     if not valid_html:
-        await status_msg.edit(content=f"Album niet gevonden. Probeer: `Artist - Album`")
+        await status_msg.edit(
+            content="Album niet gevonden. Gebruik **Artist - Album**.\n"
+                    "Bijv: `Travis Scott - Astroworld`"
+        )
         active_scrapes -= 1
         return
 
     results = parse_producers(valid_html)
 
     if not results:
-        results = ["Geen producers gevonden op deze album pagina."]
+        results = ["Geen producers gevonden op deze pagina."]
 
-    # =========================
+    # ==============================
     # EMBEDS PAGINATION
-    # =========================
+    # ==============================
 
     pages = []
     for i in range(0, len(results), 20):
@@ -190,50 +181,64 @@ async def run_scrape(ctx, album):
         pages.append(embed)
 
     await status_msg.edit(content=f"**Klaar!** {len(results)} producers gevonden")
-    message = await ctx.send(embed=pages[0])
 
-    # Paginate
+    msg = await ctx.send(embed=pages[0])
+
     if len(pages) > 1:
-        await message.add_reaction("◀️")
-        await message.add_reaction("▶️")
+        await msg.add_reaction("◀️")
+        await msg.add_reaction("▶️")
         page = 0
 
         def check(r, u):
-            return u == ctx.author and r.message.id == message.id and str(r.emoji) in ["◀️", "▶️"]
+            return (
+                u == ctx.author
+                and r.message.id == msg.id
+                and str(r.emoji) in ["◀️", "▶️"]
+            )
 
         while True:
             try:
-                r, _ = await bot.wait_for("reaction_add", timeout=180, check=check)
+                r, _ = await bot.wait_for("reaction_add", timeout=150, check=check)
                 if str(r.emoji) == "▶️" and page < len(pages) - 1:
                     page += 1
                 elif str(r.emoji) == "◀️" and page > 0:
                     page -= 1
-                await message.edit(embed=pages[page])
-                await message.remove_reaction(r, ctx.author)
+
+                await msg.edit(embed=pages[page])
+                await msg.remove_reaction(r, ctx.author)
 
             except asyncio.TimeoutError:
-                await message.clear_reactions()
+                await msg.clear_reactions()
                 break
 
     active_scrapes -= 1
 
 
-# =========================
-# COMMANDS
-# =========================
+# ==============================
+# QUEUE COMMANDS
+# ==============================
 
 @bot.command()
 async def scrape(ctx, *, album: str):
     await scrape_queue.put((ctx, album))
-    await ctx.send(f"In queue – positie {scrape_queue.qsize()} (gebruik format **Artist - Album**)")
+    await ctx.send(f"In queue – positie {scrape_queue.qsize()} (format: Artist - Album)")
+
 
 @bot.command()
 async def credits(ctx):
-    await ctx.send(f"Je hebt **{user_credits.get(ctx.author.id, 0)}** credits over.")
+    await ctx.send(f"Je hebt **{user_credits.get(ctx.author.id, 0)}** credits.")
 
 
-# =========================
-# RUN BOT
-# =========================
+# ==============================
+# RUN WORKER + BOT
+# ==============================
+
+@tasks.loop(seconds=2)
+async def worker():
+    global active_scrapes
+    while not scrape_queue.empty() and active_scrapes < MAX_CONCURRENT:
+        ctx, album = await scrape_queue.get()
+        active_scrapes += 1
+        asyncio.create_task(run_scrape(ctx, album))
 
 bot.run(os.getenv("DISCORD_TOKEN"))
