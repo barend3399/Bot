@@ -1,2 +1,4 @@
 discord.py
-aiohttp
+cloudscraper
+beautifulsoup4
+lxml
